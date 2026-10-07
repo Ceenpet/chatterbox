@@ -46,3 +46,29 @@ checkpoints/
 
 # Ignore generated sample .wav files
 **/*.wav
+
+# Local voice models and redundant filesystem snapshots
+/checkpoints_es_es/
+/snapshot_chatterbox_*/
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.nbc
+*.nbi
+
+# Generated voice previews and reproducible validation exports (root only)
+/victor_*.mp3
+/victor_*.json
+/ab_victor_*.json
+/victor_*.npy
+
+# Historical comparison tools, outside the approved experimental baseline
+/ab_victor_generate.py
+/ab_victor_precheck.py
+/victor_experimental/compare_clean_room.py
+/victor_experimental/open_mic_comparison.py
+/victor_experimental/demo.py
+/victor_experimental/pipeline.py
+/victor_experimental/test_pipeline.py
+/victor_experimental/test_native_playback.py
