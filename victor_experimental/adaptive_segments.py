@@ -147,7 +147,8 @@ class AdaptiveSegmenter:
             end,quality = candidate
             length = end-start
             tiny_tail = 0 < len(self.text)-end < mode.following_min_chars
-            return abs(length-target)+penalties.get(quality,0)+(50 if tiny_tail else 0)
+            overshoot = 0 if first else max(0.,length*self.synthesis_seconds_per_char-budget)
+            return abs(length-target)+penalties.get(quality,0)+(50 if tiny_tail else 0)+100*overshoot
         end,quality = min(candidates,key=score)
         segment = self.text[start:end].strip()
         self.offset = end
@@ -161,5 +162,7 @@ class AdaptiveSegmenter:
                     "snapshot":dict(snapshot,last_synthesis_seconds=self.last_synthesis,
                                      last_played_seconds=self.last_duration,last_ratio=self.last_ratio,
                                      recent_room_wait_seconds=recent_wait)}
+        next_bounds = [e-self.offset for e,q in self.boundaries if e>self.offset and e-self.offset>=mode.following_min_chars]
+        decision['next_natural_unit_chars'] = next_bounds[0] if next_bounds else len(self.text)-self.offset
         self.index += 1
         return segment,decision

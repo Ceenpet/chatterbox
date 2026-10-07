@@ -77,6 +77,16 @@ class VoiceEngine:
         self.rng_consumed = rng_changes(before, self.post_prepare_rng)
         self.initial_memory = cuda_memory()
 
+    def warm_up(self):
+        """Exercise CUDA without playback; restore all RNG streams even on failure."""
+        before = rng_snapshot()
+        try:
+            audio, metrics = self.synthesize("Hola, César. Te estoy escuchando y ya puedo empezar a hablar contigo.")
+            del audio
+            return metrics
+        finally:
+            restore_rng(before)
+
     def _generate(self, text, original_reference=False):
         # Preserve the exact seed, and the position in each RNG after the
         # original reference preparation. Do not substitute a new seed.

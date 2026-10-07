@@ -62,6 +62,7 @@ checkpoints/
 /victor_*.json
 /ab_victor_*.json
 /victor_*.npy
+/victor_service_runs/
 
 # Historical comparison tools, outside the approved experimental baseline
 /ab_victor_generate.py
@@ -72,3 +73,9 @@ checkpoints/
 /victor_experimental/pipeline.py
 /victor_experimental/test_pipeline.py
 /victor_experimental/test_native_playback.py
+
+# Local historical pace comparisons; require excluded trial outputs or duplicate
+# the optional stage capture now available in the service.
+/victor_experimental/compare_paced_playback.py
+/victor_experimental/demo_paced_cuda.py
+/victor_experimental/diagnose_exact_http.py

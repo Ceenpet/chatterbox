@@ -50,5 +50,27 @@ class Tests(unittest.TestCase):
     def test_unknown_mode_rejected(self):
         with self.assertRaises(ValueError):AdaptiveSegmenter(TEXT,'automatico')
 
+    def test_original_punctuation_is_never_rewritten(self):
+        text='Esta pregunta conserva su signo: ¿está todo listo? Sí, pero necesitamos revisar 3.14 y al Dr. García; después seguimos. ¡Muy bien!'
+        planner=AdaptiveSegmenter(text)
+        pieces=[]
+        while not planner.finished:
+            unit,decision=planner.next({'voice_ahead_seconds':4})
+            pieces.append(unit)
+            planner.observe(unit,3,4)
+        self.assertEqual(' '.join(pieces),text)
+
+    def test_actual_candidate_cost_not_just_target_fits_reserve(self):
+        first='Primera frase suficientemente larga para empezar tranquilos.'
+        second='Mientras escuchas esta frase, preparo lo que viene a continuación.'
+        third='No hace falta correr ni cambiar la voz para mantener una charla agradable.'
+        planner=AdaptiveSegmenter(first+' '+second+' '+third+' Una última frase completa para cerrar la conversación.')
+        planner.next()
+        planner.synthesis_seconds_per_char=.064
+        planner.last_ratio=.94
+        unit,decision=planner.next({'voice_ahead_seconds':7.16})
+        self.assertEqual(unit,second)
+        self.assertLessEqual(decision['estimated_availability_seconds'],7.56)
+
 
 if __name__=='__main__':unittest.main()

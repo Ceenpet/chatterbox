@@ -15,14 +15,17 @@ from .synthetic_room_tone import RoomTone
 from .adaptive_segments import AdaptiveSegmenter
 from .speed_comparison import wsola
 
+from .conversation_timing import PLAYBACK_SPEED, boundary_pause, startup_hold
+
 
 class LiveContinuity:
-    def __init__(self, engine, reference, device_factory=ContinuousDevice, capture=False, strategy="tranquilo"):
+    def __init__(self, engine, reference, device_factory=ContinuousDevice, capture=False, strategy="tranquilo", audio_observer=None):
         self.engine = engine
         self.reference = reference
         self.device_factory = device_factory
         self.capture = capture
         self.strategy = strategy
+        self.audio_observer = audio_observer  # Optional producer-side diagnostic capture.
         self.cancelled = threading.Event()
         self.cancel_requested = None
         self.lock = threading.Lock()
@@ -31,12 +34,24 @@ class LiveContinuity:
         self.cancel_requested = time.perf_counter()
         self.cancelled.set()
 
-    def run(self, text, strategy=None):
+    def run(self, text, strategy=None, *, on_event=None, cancel_event=None):
         planner = AdaptiveSegmenter(text, strategy or self.strategy)
         if not self.lock.acquire(blocking=False):
             raise RuntimeError("One response at a time; cancel and await prior run before replacing")
         self.cancelled.clear()
         self.cancel_requested = None
+        # External turn cancellation survives a request arriving before run().
+        if cancel_event is not None and cancel_event.is_set():
+            self.cancel()
+
+        def notify(event):
+            if on_event is not None:
+                try:
+                    on_event(event, time.perf_counter())
+                except Exception:
+                    pass  # Optional telemetry must never interrupt audio.
+
+        playback_notified = False
         sr, block_size = 24000, 960  # 40ms; 6 queued blocks = 240ms scheduling reserve
         segments = []
         if planner.finished:
@@ -81,8 +96,18 @@ class LiveContinuity:
                     synthesis_done = time.perf_counter()
                     if self.cancelled.is_set():
                         break
-                    voice = wsola(voice, sr, .83)
+                    if self.audio_observer is not None:
+                        self.audio_observer(index, sentence, 'raw', voice)
+                    # Natural cadence bypasses time-stretch completely.
+                    if PLAYBACK_SPEED != 1.:
+                        voice = wsola(voice, sr, PLAYBACK_SPEED)
                     voice, corrections = suppress_isolated_tail_impulse(voice, sr)
+                    if self.audio_observer is not None:
+                        self.audio_observer(index, sentence, 'processed', voice)
+                    voice_seconds = len(voice)/sr
+                    pause_seconds = boundary_pause(decision)
+                    if pause_seconds:
+                        voice = np.concatenate((voice, np.zeros(round(pause_seconds*sr), dtype=voice.dtype)))
                     gain = room.prepare_voice(voice)
                     ready = time.perf_counter()
                     record = dict(metrics, index=index, text=sentence,
@@ -91,6 +116,8 @@ class LiveContinuity:
                                   ready_seconds=ready-submitted,
                                   postprocessing_seconds=ready-synthesis_done,
                                   played_voice_seconds=len(voice)/sr,
+                                  speech_segment_seconds=voice_seconds,
+                                  added_pause_seconds=pause_seconds,
                                   segmentation=decision,
                                   generation_over_stretched_audio=metrics["synthesis_seconds"]/(len(voice)/sr),
                                   tail_impulse_corrections=corrections)
@@ -114,11 +141,13 @@ class LiveContinuity:
         background_only_frames = 0
         background_nonzero_gain_frames = 0
         first_ready = None
+        startup_hold_seconds = 0.
         first_voice_start = None
         last_gain = 0.
         segment_entry_gain = 0.
         wait_entry_gain = 1.
         last_metric_sample = 0.
+        clock_samples = []
         try:
             device = self.device_factory(sr, depth=6, capture=self.capture)
             worker = threading.Thread(target=produce, name="victor-live-synthesis")
@@ -129,10 +158,22 @@ class LiveContinuity:
                 try:
                     cursor = audio_queue.get(timeout=.02)
                     first_ready = time.perf_counter()-submitted
+                    startup_hold_seconds = startup_hold(cursor[0], planner.strategy.name)
                 except queue.Empty:
                     if producer_done.is_set():
                         break
             completed = False
+            # No PCM is played in this pre-roll. Cancellation remains immediate,
+            # and the existing producer continues on CUDA into the same queue.
+            if first_ready is not None and startup_hold_seconds:
+                hold_started = time.perf_counter()
+                while not self.cancelled.is_set() and time.perf_counter()-hold_started < startup_hold_seconds:
+                    # Once the next full unit is available, more pre-roll is
+                    # unnecessary. No extra latency after all synthesis ends.
+                    if not audio_queue.empty() or producer_done.is_set():
+                        break
+                    self.cancelled.wait(.01)
+                startup_hold_seconds = time.perf_counter()-hold_started
             deadline = time.perf_counter()+300
             while cursor is not None or not completed:
                 if self.cancelled.is_set():
@@ -146,6 +187,7 @@ class LiveContinuity:
                 # count as useful voice reserve. Never query the driver in TTS.
                 if time.perf_counter()-last_metric_sample >= .04:
                     driver_frames = device.position()
+                    clock_samples.append((driver_frames, time.perf_counter()-submitted))
                     with metrics_lock:
                         reserve["played_voice_frames"] = sum(
                             max(0,min(driver_frames-round(r.get("pcm_start_seconds",0)*sr),r.get("pcm_sent_frames",0)))
@@ -153,6 +195,9 @@ class LiveContinuity:
                     last_metric_sample = time.perf_counter()
                 if len(device.pending) >= device.depth:
                     device.restart()
+                    if not playback_notified and device.first_restart is not None:
+                        notify("audio_started")
+                        playback_notified = True
                     self.cancelled.wait(.003)
                     if time.perf_counter() > deadline:
                         raise RuntimeError("Response/device timeout")
@@ -231,6 +276,9 @@ class LiveContinuity:
                 output_frames += count
             if not self.cancelled.is_set():
                 device.restart()
+                if not playback_notified and device.first_restart is not None:
+                    notify("audio_started")
+                    playback_notified = True
             while device.pending and not self.cancelled.is_set():
                 device.reap()
                 self.cancelled.wait(.003)
@@ -239,8 +287,30 @@ class LiveContinuity:
             if self.cancelled.is_set() and device.stop_ack is None:
                 device.cancel()
             final_position = device.position()
+            clock_samples.append((final_position, time.perf_counter()-submitted))
+            def consumed_at(frame):
+                return float(np.interp(frame, [p[0] for p in clock_samples], [p[1] for p in clock_samples]))
+            boundaries = []
+            pauses = []
+            for record in records:
+                if "pcm_end_seconds" not in record:
+                    continue
+                end = consumed_at(round(record["pcm_end_seconds"]*sr))
+                if record["added_pause_seconds"]:
+                    begin = consumed_at(round((record["pcm_end_seconds"]-record["added_pause_seconds"])*sr))
+                    pauses.append({"after_segment": record["index"], "duration_seconds": record["added_pause_seconds"],
+                        "synthesis_overlap_seconds": sum(max(0., min(end,r["synthesis_done_seconds"])-max(begin,r["synthesis_start_seconds"])) for r in records if r["index"] > record["index"])})
+                following = next((r for r in records if r["index"] == record["index"]+1), None)
+                if following:
+                    boundaries.append({"after_segment":record["index"], "margin_seconds":end-following["ready_seconds"]})
+            notify("audio_stopped")
             pcm_blocks = list(device.capture) if device.capture is not None else None
             result = {"segments": segments, "records": records, "cancelled": self.cancelled.is_set(),
+                      "playback_speed": PLAYBACK_SPEED,
+                      "startup_hold_seconds": startup_hold_seconds,
+                      "added_pause_total_seconds": sum(r["added_pause_seconds"] for r in records),
+                      "boundary_margins": boundaries, "planned_pauses": pauses,
+                      "margin_definition": "PCM readiness versus driver consumption; ~40ms sampling, no acoustic loopback",
                       "strategy":planner.strategy.name,
                       "errors": errors, "first_pcm_ready_seconds": first_ready,
                       "first_voice_submit_seconds": first_voice_start,

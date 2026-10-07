@@ -1,11 +1,22 @@
 # Víctor: generación progresiva experimental
 
+La referencia conversacional aprobada reproduce a velocidad natural 1.00,
+sin WSOLA, con reserva inicial adaptativa;
+véase [PROPUESTA_CONVERSACION_NATURAL.md](PROPUESTA_CONVERSACION_NATURAL.md).
+La referencia anterior a 0.85 se conserva intacta en la copia recuperable
+`snapshot_chatterbox_natural_before_20261007_212457/victor_experimental/`.
+
 La referencia vigente, aprobada el 7 de octubre de 2026, está documentada en
 [BASELINE_ESTABLE.md](BASELINE_ESTABLE.md). Incluye el fondo sintético actual,
-velocidad 0.83 y reproducción PCM continua. Ese documento prevalece sobre las
+velocidad natural 1.00 sin WSOLA, pausas lingüísticas de 300–350 ms y reproducción PCM continua. Ese documento prevalece sobre las
 descripciones históricas de pruebas y fondos anteriores que siguen a continuación.
 La fase de continuidad acústica está cerrada; no se optimiza de nuevo sin un
 problema real detectado y autorización del usuario.
+
+La primera capa de control independiente para texto → voz se documenta en
+[SERVICE_LOCAL.md](SERVICE_LOCAL.md): HTTP/JSON en loopback, motor persistente,
+IDs de turno, recepción incremental acumulada y cancelación. No integra Nexo
+ni modifica la configuración acústica del baseline.
 
 Para reconstruirla desde un clon limpio, consultar la sección de recursos externos
 en `BASELINE_ESTABLE.md`. Las demos activas son `demo_live_continuity` y
@@ -261,7 +272,7 @@ completa corta no se retrasa artificialmente ni se rellena con texto.
 
 Después del primer bloque, ambos modos utilizan margen de voz disponible y
 estimaciones suavizadas del coste de generación/postprocesado por carácter.
-El último tiempo de síntesis, duración a 0.83, ratio síntesis/duración y room
+El último tiempo de síntesis, duración reproducida a 0.85 con pausa planificada, ratio síntesis/duración y room
 tone por espera se incluyen en cada decisión. Ante margen bajo, esperas nuevas
 o síntesis lenta, se prefiere la siguiente unidad natural más corta. Si hay
 reserva y RTF favorable se admiten bloques más largos, reduciendo cortes y coste

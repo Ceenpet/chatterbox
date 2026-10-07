@@ -3,6 +3,7 @@ from pathlib import Path
 import threading
 import time
 import unittest
+from unittest.mock import patch
 import numpy as np
 from .live_continuity import LiveContinuity
 from .continuous_audio import ContinuousDevice
@@ -29,6 +30,18 @@ class Engine:
 
 
 class Tests(unittest.TestCase):
+    def test_natural_path_bypasses_wsola_and_optional_stages_precede_pauses(self):
+        stages=[]
+        stream=LiveContinuity(Engine(delays=(.01,.01)),ROOT/'mi_voz.wav',strategy='rapido',
+            audio_observer=lambda index,text,stage,audio:stages.append((index,stage,audio.copy())))
+        with patch('victor_experimental.live_continuity.wsola',side_effect=AssertionError('WSOLA called')):
+            result=stream.run(TEXT)
+        self.assertEqual(result['playback_speed'],1.)
+        self.assertEqual([s[1] for s in stages],['raw','processed','raw','processed'])
+        self.assertTrue(np.array_equal(stages[0][2],stages[1][2]))
+        self.assertEqual(len(stages[0][2]),2400)
+        self.assertAlmostEqual(result['records'][0]['played_voice_seconds'],.45)
+
     def test_failed_device_initialization_releases_response_lock(self):
         def unavailable(*args,**kwargs):
             raise RuntimeError('device unavailable')
@@ -39,13 +52,13 @@ class Tests(unittest.TestCase):
 
     def test_adaptive_reserve_counts_voice_not_room_wait(self):
         text=TEXT+' Esta última frase termina la comprobación del margen.'
-        stream=LiveContinuity(Engine(delays=(.01,.35,.01)),ROOT/'mi_voz.wav',strategy='rapido')
+        stream=LiveContinuity(Engine(delays=(.01,.80,.01)),ROOT/'mi_voz.wav',strategy='rapido')
         result=stream.run(text)
         self.assertEqual(len(result['records']),3)
         snapshot=result['records'][2]['segmentation']['snapshot']
         self.assertGreater(snapshot['room_only_total_seconds'],.1)
         self.assertGreater(snapshot['voice_ahead_seconds'],0)
-        self.assertLessEqual(snapshot['voice_ahead_seconds'],.25)
+        self.assertLessEqual(snapshot['voice_ahead_seconds'],.60)
 
     def test_room_only_is_continuous_and_no_voice_rng_changes(self):
         before = np.random.get_state()
@@ -68,7 +81,7 @@ class Tests(unittest.TestCase):
         self.assertFalse(stream.audit[0]['loop'])
 
     def test_real_device_wait_fill_and_exact_capture(self):
-        stream = LiveContinuity(Engine(), ROOT/'mi_voz.wav', capture=True,strategy='rapido')
+        stream = LiveContinuity(Engine(delays=(.03,.70)), ROOT/'mi_voz.wav', capture=True,strategy='rapido')
         result = stream.run(TEXT)
         self.assertFalse(result['cancelled'])
         self.assertGreater(result['room_only_wait_seconds'],.1)
@@ -90,6 +103,27 @@ class Tests(unittest.TestCase):
         self.assertTrue(result[0]['cancelled'])
         self.assertLess(result[0]['cancel_stop_latency_seconds'],.05)
         self.assertEqual(len(result[0]['records']),1)
+
+    def test_optional_observer_and_pre_run_cancellation(self):
+        stopped = threading.Event()
+        stopped.set()
+        events = []
+        engine = Engine()
+        stream = LiveContinuity(engine, ROOT/'mi_voz.wav')
+        result = stream.run(TEXT, cancel_event=stopped,
+                            on_event=lambda name, stamp: events.append(name))
+        self.assertTrue(result['cancelled'])
+        self.assertEqual(result['output_frames'], 0)
+        self.assertEqual(engine.index, 0)
+        self.assertNotIn('audio_started', events)
+        self.assertIn('audio_stopped', events)
+
+    def test_observer_failure_cannot_interrupt_audio(self):
+        def broken_observer(*args):
+            raise RuntimeError('telemetry failure')
+        result = LiveContinuity(Engine(), ROOT/'mi_voz.wav').run(TEXT, on_event=broken_observer)
+        self.assertFalse(result['cancelled'])
+        self.assertEqual(result['driver_position_frames'], result['output_frames'])
 
 
 if __name__ == '__main__':
